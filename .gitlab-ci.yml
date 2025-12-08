@@ -1,0 +1,53 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      when: always
+    - when: never
+
+stages:
+  - gen
+  - child
+
+variables:
+  ARTIFACTORY_URL: "https://harbor.redgelabs.com"
+  ARTIFACTORY_USER: "$HARBOR_DOCKER_USER"
+  ARTIFACTORY_PASS: "$HARBOR_DOCKER_PASS"
+  DOCKER_REGISTRY: "harbor.redgelabs.com"
+  DOCKER_REPOSITORY: "jenkins"
+  http_proxy: "http://proxy.redge.com:3128"
+  https_proxy: "http://proxy.redge.com:3128"
+  HTTP_PROXY: "http://proxy.redge.com:3128"
+  HTTPS_PROXY: "http://proxy.redge.com:3128"
+  no_proxy: "localhost,127.0.0.1,docker,drm-gitlab.redlabs.pl,artifactory.redlabs.pl,r.dcs.redcdn.pl,harbor.redgelabs.com,jenkins.redge.com,*.redgelabs.com"
+  NO_PROXY: "localhost,127.0.0.1,docker,drm-gitlab.redlabs.pl,artifactory.redlabs.pl,r.dcs.redcdn.pl,harbor.redgelabs.com,jenkins.redge.com,*.redgelabs.com"
+
+default:
+  before_script:
+    - echo "Setup Docker environment"
+    - export HTTP_PROXY=$HTTP_PROXY
+    - export HTTPS_PROXY=$HTTPS_PROXY
+    - export NO_PROXY=$NO_PROXY
+    - docker login -u "$ARTIFACTORY_USER" -p "$ARTIFACTORY_PASS" "$ARTIFACTORY_URL"
+generate-jobs:
+  stage: gen
+  image: docker:latest
+  script:
+    - chmod +x generate.sh           
+    - ./generate.sh                  
+  artifacts:
+    paths:
+      - generated-child.yml
+
+child-pipeline:
+  stage: child
+  rules:
+    - changes:
+      - "images/*/Dockerfile"
+    - when: never
+  trigger:
+    include:
+      - artifact: generated-child.yml
+        job: generate-jobs
+    strategy: depend

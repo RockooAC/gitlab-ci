@@ -1,0 +1,47 @@
+FROM debian:bookworm-slim  
+
+ENV \
+    GRADLE_VERSION=6.9 \
+    JAVA21_HOME=/usr/lib/jvm/java-21-amazon-corretto 
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-requests \
+    python3-fabric \
+    python3-pip \
+    jq \
+    nano \
+    git \
+    ssh \
+    curl \
+    atop \
+    wget \
+    unzip && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN GRADLE_VERSION=$(curl -s https://services.gradle.org/versions/current | jq -r .version) && \
+    curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip && \
+    mkdir -p /opt/gradle && \
+    unzip /tmp/gradle.zip -d /opt/gradle && \
+    rm /tmp/gradle.zip && \
+    ln -s /opt/gradle/gradle-${GRADLE_VERSION}/bin/gradle /usr/bin/gradle
+
+RUN wget https://r.dcs.redcdn.pl/file/o2/dsw/jenkins/packages/java-21-amazon-corretto-jdk_21.0.5.11-1_amd64.deb -O /tmp/java-21-amazon-corretto-jdk_21.0.5.11-1_amd64.deb && \
+    apt-get update && apt-get install -y /tmp/java-21-amazon-corretto-jdk_21.0.5.11-1_amd64.deb && \
+    rm -f /tmp/java-21-amazon-corretto-jdk_21.0.5.11-1_amd64.deb && \
+    java -version
+
+
+RUN ln -sfn ${JAVA21_HOME} /usr/lib/jvm/java-21-openjdk-amd64
+
+ENV JAVA_HOME=${JAVA21_HOME}
+ENV PATH=${JAVA_HOME}/bin:/opt/gradle/bin:$PATH
+
+RUN pip3 install --break-system-packages fabric2
+
+RUN useradd -ms /bin/bash jenkins
+
+USER jenkins
+RUN mkdir -p /home/jenkins/.ssh
