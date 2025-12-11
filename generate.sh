@@ -69,8 +69,12 @@ if [ -z "$ALL_DIRS" ]; then
   echo "stages: []" > generated-child.yml
 else
   echo "stages:" > generated-child.yml
-  echo "  - build" >> generated-child.yml
-  echo "  - push"  >> generated-child.yml
+  DEPTH=0
+  while [ $DEPTH -le $MAX_DEPTH ]; do
+    echo "  - build-$DEPTH" >> generated-child.yml
+    echo "  - push-$DEPTH" >> generated-child.yml
+    DEPTH=$((DEPTH + 1))
+  done
   echo "  - update-pvc"  >> generated-child.yml
 
   echo "Directories selected for build: $ALL_DIRS"
@@ -78,7 +82,7 @@ else
   for DIR in $ALL_DIRS; do
     cat >> generated-child.yml <<EOF
 build-${DIR}:
-  stage: build
+  stage: build-${DIR_DEPTH}
   image: docker:latest
   services:
     - name: docker:dind
@@ -96,7 +100,7 @@ build-${DIR}:
                    ./images/$DIR
 
 push-${DIR}:
-  stage: push
+  stage: push-${DIR_DEPTH}
   image: docker:latest
   services:
     - name: docker:dind
