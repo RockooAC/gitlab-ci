@@ -17,14 +17,6 @@ echo "Base directories found in last commit: ${CHANGED_DIRS:-"<none>"}"
 PREFIX="${DOCKER_REGISTRY:-harbor.redgelabs.com}/${DOCKER_REPOSITORY:-jenkins}/"
 DEPENDENCY_PAIRS=""
 
-append_pair_unique() {
-  PAIR="$1"
-  case " $DEPENDENCY_PAIRS " in
-    *" $PAIR "*) ;;
-    *) DEPENDENCY_PAIRS="$DEPENDENCY_PAIRS $PAIR" ;;
-  esac
-}
-
 echo "Scanning Dockerfiles for parent-child relationships (prefix: $PREFIX)"
 for DOCKERFILE in images/*/Dockerfile; do
   DIR=$(basename "$(dirname "$DOCKERFILE")")
@@ -33,28 +25,16 @@ for DOCKERFILE in images/*/Dockerfile; do
       "$PREFIX"*)
         BASE_IMAGE=${IMAGE_REF#"$PREFIX"}
         BASE_IMAGE=${BASE_IMAGE%%[:@]*}
-        append_pair_unique "${BASE_IMAGE}:${DIR}"
+        DEPENDENCY_PAIRS="$DEPENDENCY_PAIRS ${BASE_IMAGE}:${DIR}"
         ;;
     esac
-  done <<EOF_INNER
+  done <<EOF
 $(grep -E '^FROM[[:space:]]+' "$DOCKERFILE" | awk '{print $2}')
-EOF_INNER
+EOF
 done
 
-ALL_DIRS=""
+ALL_DIRS="$CHANGED_DIRS"
 DEPENDENTS_ADDED=""
-
-append_unique() {
-  VALUE="$1"
-  case " $ALL_DIRS " in
-    *" $VALUE "*) ;;
-    *) ALL_DIRS="$ALL_DIRS $VALUE" ;;
-  esac
-}
-
-for DIR in $CHANGED_DIRS; do
-  append_unique "$DIR"
-done
 
 if [ -n "$ALL_DIRS" ]; then
   ADDED=1
@@ -66,12 +46,14 @@ if [ -n "$ALL_DIRS" ]; then
 
       case " $ALL_DIRS " in
         *" $BASE "*)
-          append_unique "$DEPENDENT"
-          case " $DEPENDENTS_ADDED " in
+          case " $ALL_DIRS " in
             *" $DEPENDENT "*) ;;
-            *) DEPENDENTS_ADDED="$DEPENDENTS_ADDED $DEPENDENT" ;;
+            *)
+              ALL_DIRS="$ALL_DIRS $DEPENDENT"
+              DEPENDENTS_ADDED="$DEPENDENTS_ADDED $DEPENDENT"
+              ADDED=1
+              ;;
           esac
-          ADDED=1
           ;;
       esac
     done
@@ -87,26 +69,20 @@ if [ -z "$ALL_DIRS" ]; then
   echo "stages: []" > generated-child.yml
 else
   echo "stages:" > generated-child.yml
-  echo "  - build" >> generated-child.yml
+  DEPTH=0
+  while [ $DEPTH -le $MAX_DEPTH ]; do
+    echo "  - build-$DEPTH" >> generated-child.yml
+    echo "  - push-$DEPTH" >> generated-child.yml
+    DEPTH=$((DEPTH + 1))
+  done
   echo "  - update-pvc"  >> generated-child.yml
 
   echo "Directories selected for build: $ALL_DIRS"
 
   for DIR in $ALL_DIRS; do
-    NEEDS=""
-    for PAIR in $DEPENDENCY_PAIRS; do
-      BASE=${PAIR%%:*}
-      DEP=${PAIR#*:}
-      if [ "$DEP" = "$DIR" ]; then
-        case " $ALL_DIRS " in
-          *" $BASE "*) NEEDS="$NEEDS build-push-$BASE" ;;
-        esac
-      fi
-    done
-
-    cat >> generated-child.yml <<EOF_JOB
-build-push-${DIR}:
-  stage: build
+    cat >> generated-child.yml <<EOF
+build-${DIR}:
+  stage: build-${DIR_DEPTH}
   image: docker:latest
   services:
     - name: docker:dind
@@ -132,6 +108,19 @@ EOF_JOB
                    --build-arg NO_PROXY=\$NO_PROXY \
                    -t "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/$DIR:latest" \
                    ./images/$DIR
+
+push-${DIR}:
+  stage: push-${DIR_DEPTH}
+  image: docker:latest
+  services:
+    - name: docker:dind
+  needs: ["build-${DIR}"]
+  before_script:
+    - export HTTP_PROXY=\$HTTP_PROXY
+    - export HTTPS_PROXY=\$HTTPS_PROXY
+    - export NO_PROXY=\$NO_PROXY
+    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+  script:
     - echo "Pushing image for $DIR"
     - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/$DIR:latest"
 
