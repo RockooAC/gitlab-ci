@@ -1,9 +1,9 @@
-#!/bin/sh                  
+#!/bin/sh
 #
 # Skrypt generujący dynamiczny plik child pipeline: generated-child.yml
 # Wywoływany przez job 'generate-jobs' w .gitlab-ci.yml
 
-set -e 
+set -e
 
 echo "Identifying changed directories in ./images"
 
@@ -86,6 +86,16 @@ build-${DIR}:
   image: docker:latest
   services:
     - name: docker:dind
+EOF_JOB
+
+    if [ -n "$NEEDS" ]; then
+      echo "  needs:" >> generated-child.yml
+      for N in $NEEDS; do
+        echo "    - \"$N\"" >> generated-child.yml
+      done
+    fi
+
+    cat >> generated-child.yml <<EOF_JOB
   before_script:
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
@@ -113,11 +123,11 @@ push-${DIR}:
   script:
     - echo "Pushing image for $DIR"
     - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/$DIR:latest"
-  
+
 update-pvc-${DIR}:
   stage: update-pvc
   image: ubuntu:22.04
-  needs: ["push-${DIR}"]
+  needs: ["build-push-${DIR}"]
   before_script:
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
@@ -131,7 +141,7 @@ update-pvc-${DIR}:
     - |
       # Dynamic parameters
       IMAGE_REF="\${DOCKER_REGISTRY}/\${DOCKER_REPOSITORY}/${DIR}:latest"
-      
+
       echo "=== 🚦 ETAP UPDATE-PVC ==="
       echo "📌 Zmienne:"
       echo "   IMAGE_REF: \$IMAGE_REF"
@@ -139,9 +149,9 @@ update-pvc-${DIR}:
 
       # Get CRUMB for CSRF protection
       echo "=== 🔒 Pobieranie CRUMB ==="
-      CRUMB_JSON=\$(curl -s -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \\
+      CRUMB_JSON=\$(curl -s -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
         "\${JENKINS_URL}/crumbIssuer/api/json")
-      
+
       if ! CRUMB=\$(echo "\$CRUMB_JSON" | jq -r '.crumb'); then
         echo "❌ Błąd parsowania CRUMB:"
         exit 1
@@ -153,15 +163,15 @@ update-pvc-${DIR}:
       FULL_URL="\${JENKINS_URL}/\${JENKINS_JOB_PATH}/buildWithParameters"
       echo " URL: \$FULL_URL"
 
-      HTTP_STATUS=\$(curl -w "%{http_code}" -s -o /tmp/jenkins_response \\
-        -X POST \\
-        -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \\
-        -H "\${CRUMB_HEADER}: \${CRUMB}" \\
-        --data-urlencode "IMAGE_NAME=\${IMAGE_REF}" \\
+      HTTP_STATUS=\$(curl -w "%{http_code}" -s -o /tmp/jenkins_response \
+        -X POST \
+        -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
+        -H "\${CRUMB_HEADER}: \${CRUMB}" \
+        --data-urlencode "IMAGE_NAME=\${IMAGE_REF}" \
         "\$FULL_URL")
 
       echo "📡 Status HTTP: \$HTTP_STATUS"
-      
+
       if [ "\$HTTP_STATUS" = "201" ]; then
         echo "✅ Job uruchomiony pomyślnie!"
         echo "⚙️ Szczegóły: \${JENKINS_URL}/\${JENKINS_JOB_PATH}"
@@ -173,7 +183,7 @@ update-pvc-${DIR}:
   rules:
     - if: \$CI_COMMIT_BRANCH == "main"
 
-EOF
+EOF_JOB
   done
 fi
-echo "Pipeline generated successfully"   
+echo "Pipeline generated successfully"
