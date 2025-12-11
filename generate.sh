@@ -33,59 +33,8 @@ $(grep -E '^FROM[[:space:]]+' "$DOCKERFILE" | awk '{print $2}')
 EOF
 done
 
-ALL_DIRS=""
+ALL_DIRS="$CHANGED_DIRS"
 DEPENDENTS_ADDED=""
-DEPTH_MAP=""
-
-append_unique() {
-  VALUE="$1"
-  case " $ALL_DIRS " in
-    *" $VALUE "*) ;;
-    *) ALL_DIRS="$ALL_DIRS $VALUE" ;;
-  esac
-}
-
-get_depth() {
-  KEY="$1"
-  for ENTRY in $DEPTH_MAP; do
-    NAME=${ENTRY%%:*}
-    DEPTH=${ENTRY#*:}
-    if [ "$NAME" = "$KEY" ]; then
-      echo "$DEPTH"
-      return
-    fi
-  done
-  echo ""
-}
-
-set_depth() {
-  KEY="$1"
-  VALUE="$2"
-
-  UPDATED=""
-  FOUND="0"
-  for ENTRY in $DEPTH_MAP; do
-    NAME=${ENTRY%%:*}
-    DEPTH=${ENTRY#*:}
-    if [ "$NAME" = "$KEY" ]; then
-      UPDATED="$UPDATED ${NAME}:$VALUE"
-      FOUND="1"
-    else
-      UPDATED="$UPDATED $ENTRY"
-    fi
-  done
-
-  if [ "$FOUND" = "0" ]; then
-    UPDATED="$UPDATED ${KEY}:$VALUE"
-  fi
-
-  DEPTH_MAP="$UPDATED"
-}
-
-for DIR in $CHANGED_DIRS; do
-  append_unique "$DIR"
-  set_depth "$DIR" 0
-done
 
 if [ -n "$ALL_DIRS" ]; then
   ADDED=1
@@ -95,21 +44,18 @@ if [ -n "$ALL_DIRS" ]; then
       BASE=${PAIR%%:*}
       DEPENDENT=${PAIR#*:}
 
-      BASE_DEPTH=$(get_depth "$BASE")
-      if [ -n "$BASE_DEPTH" ]; then
-        DEPTH_CANDIDATE=$((BASE_DEPTH + 1))
-        CURRENT_DEPTH=$(get_depth "$DEPENDENT")
-
-        if [ -z "$CURRENT_DEPTH" ] || [ $DEPTH_CANDIDATE -lt $CURRENT_DEPTH ]; then
-          append_unique "$DEPENDENT"
-          set_depth "$DEPENDENT" "$DEPTH_CANDIDATE"
-          case " $DEPENDENTS_ADDED " in
+      case " $ALL_DIRS " in
+        *" $BASE "*)
+          case " $ALL_DIRS " in
             *" $DEPENDENT "*) ;;
-            *) DEPENDENTS_ADDED="$DEPENDENTS_ADDED $DEPENDENT" ;;
+            *)
+              ALL_DIRS="$ALL_DIRS $DEPENDENT"
+              DEPENDENTS_ADDED="$DEPENDENTS_ADDED $DEPENDENT"
+              ADDED=1
+              ;;
           esac
-          ADDED=1
-        fi
-      fi
+          ;;
+      esac
     done
   done
 fi
@@ -117,14 +63,6 @@ fi
 if [ -n "$DEPENDENTS_ADDED" ]; then
   echo "Dependents added: $DEPENDENTS_ADDED"
 fi
-
-MAX_DEPTH=0
-for ENTRY in $DEPTH_MAP; do
-  DEPTH=${ENTRY#*:}
-  if [ "$DEPTH" -gt "$MAX_DEPTH" ]; then
-    MAX_DEPTH="$DEPTH"
-  fi
-done
 
 if [ -z "$ALL_DIRS" ]; then
   echo "No changes in ./images. Not generating any jobs."
@@ -142,7 +80,6 @@ else
   echo "Directories selected for build: $ALL_DIRS"
 
   for DIR in $ALL_DIRS; do
-    DIR_DEPTH=$(get_depth "$DIR")
     cat >> generated-child.yml <<EOF
 build-${DIR}:
   stage: build-${DIR_DEPTH}
