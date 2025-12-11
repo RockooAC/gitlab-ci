@@ -12,7 +12,59 @@ CHANGED_DIRS=$(git diff --name-only HEAD~1 HEAD ./images \
   | sort \
   | uniq)
 
-if [ -z "$CHANGED_DIRS" ]; then
+echo "Base directories found in last commit: ${CHANGED_DIRS:-"<none>"}"
+
+PREFIX="${DOCKER_REGISTRY:-harbor.redgelabs.com}/${DOCKER_REPOSITORY:-jenkins}/"
+DEPENDENCY_PAIRS=""
+
+echo "Scanning Dockerfiles for parent-child relationships (prefix: $PREFIX)"
+for DOCKERFILE in images/*/Dockerfile; do
+  DIR=$(basename "$(dirname "$DOCKERFILE")")
+  while IFS= read -r IMAGE_REF; do
+    case "$IMAGE_REF" in
+      "$PREFIX"*)
+        BASE_IMAGE=${IMAGE_REF#"$PREFIX"}
+        BASE_IMAGE=${BASE_IMAGE%%[:@]*}
+        DEPENDENCY_PAIRS="$DEPENDENCY_PAIRS ${BASE_IMAGE}:${DIR}"
+        ;;
+    esac
+  done <<EOF
+$(grep -E '^FROM[[:space:]]+' "$DOCKERFILE" | awk '{print $2}')
+EOF
+done
+
+ALL_DIRS="$CHANGED_DIRS"
+DEPENDENTS_ADDED=""
+
+if [ -n "$ALL_DIRS" ]; then
+  ADDED=1
+  while [ $ADDED -eq 1 ]; do
+    ADDED=0
+    for PAIR in $DEPENDENCY_PAIRS; do
+      BASE=${PAIR%%:*}
+      DEPENDENT=${PAIR#*:}
+
+      case " $ALL_DIRS " in
+        *" $BASE "*)
+          case " $ALL_DIRS " in
+            *" $DEPENDENT "*) ;;
+            *)
+              ALL_DIRS="$ALL_DIRS $DEPENDENT"
+              DEPENDENTS_ADDED="$DEPENDENTS_ADDED $DEPENDENT"
+              ADDED=1
+              ;;
+          esac
+          ;;
+      esac
+    done
+  done
+fi
+
+if [ -n "$DEPENDENTS_ADDED" ]; then
+  echo "Dependents added: $DEPENDENTS_ADDED"
+fi
+
+if [ -z "$ALL_DIRS" ]; then
   echo "No changes in ./images. Not generating any jobs."
   echo "stages: []" > generated-child.yml
 else
@@ -21,7 +73,9 @@ else
   echo "  - push"  >> generated-child.yml
   echo "  - update-pvc"  >> generated-child.yml
 
-  for DIR in $CHANGED_DIRS; do
+  echo "Directories selected for build: $ALL_DIRS"
+
+  for DIR in $ALL_DIRS; do
     cat >> generated-child.yml <<EOF
 build-${DIR}:
   stage: build
