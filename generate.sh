@@ -3,35 +3,42 @@
 # Skrypt generujący dynamiczny plik child pipeline: generated-child.yml
 # Wywoływany przez job 'generate-jobs' w .gitlab-ci.yml
 
-set -e
+set -eu
 
 echo "Identifying changed directories in ./images"
 
-CHANGED_DIRS=$(git diff --name-only HEAD~1 HEAD ./images \
-  | awk -F'/' '{print $2}' \
-  | sort \
-  | uniq)
+FROM_REF="${CI_COMMIT_BEFORE_SHA:-HEAD~1}"
+TO_REF="${CI_COMMIT_SHA:-HEAD}"
 
-echo "Base directories found in last commit: ${CHANGED_DIRS:-"<none>"}"
+CHANGED_DIRS=$(git diff --name-only "$FROM_REF" "$TO_REF" -- ./images \
+  | awk -F'/' 'NF>=2 {print $2}' \
+  | sort -u)
 
-PREFIX="${DOCKER_REGISTRY:-harbor.redgelabs.com}/${DOCKER_REPOSITORY:-jenkins}/"
+echo "Base directories found in diff: ${CHANGED_DIRS:-"<none>"}"
+
+echo "Scanning Dockerfiles for parent-child relationships (by local dir name)"
 DEPENDENCY_PAIRS=""
-
-echo "Scanning Dockerfiles for parent-child relationships (prefix: $PREFIX)"
 for DOCKERFILE in images/*/Dockerfile; do
-  DIR=$(basename "$(dirname "$DOCKERFILE")")
+  [ -f "$DOCKERFILE" ] || continue
+  CHILD_DIR=$(basename "$(dirname "$DOCKERFILE")")
   while IFS= read -r IMAGE_REF; do
-    case "$IMAGE_REF" in
-      "$PREFIX"*)
-        BASE_IMAGE=${IMAGE_REF#"$PREFIX"}
-        BASE_IMAGE=${BASE_IMAGE%%[:@]*}
-        DEPENDENCY_PAIRS="$DEPENDENCY_PAIRS ${BASE_IMAGE}:${DIR}"
-        ;;
-    esac
-  done <<EOF
+    BASE_IMAGE=${IMAGE_REF##*/}
+    BASE_IMAGE=${BASE_IMAGE%%@*}
+    BASE_IMAGE=${BASE_IMAGE%%:*}
+
+    if [ -d "images/${BASE_IMAGE}" ]; then
+      PAIR="${BASE_IMAGE}:${CHILD_DIR}"
+      case " $DEPENDENCY_PAIRS " in
+        *" $PAIR "*) ;;
+        *) DEPENDENCY_PAIRS="$DEPENDENCY_PAIRS $PAIR" ;;
+      esac
+    fi
+  done <<EOF_FROM
 $(grep -E '^FROM[[:space:]]+' "$DOCKERFILE" | awk '{print $2}')
-EOF
+EOF_FROM
 done
+
+echo "Dependency pairs (BASE:CHILD): ${DEPENDENCY_PAIRS:-"<none>"}"
 
 ALL_DIRS="$CHANGED_DIRS"
 DEPENDENTS_ADDED=""
@@ -67,62 +74,58 @@ fi
 if [ -z "$ALL_DIRS" ]; then
   echo "No changes in ./images. Not generating any jobs."
   echo "stages: []" > generated-child.yml
-else
-  echo "stages:" > generated-child.yml
-  DEPTH=0
-  while [ $DEPTH -le $MAX_DEPTH ]; do
-    echo "  - build-$DEPTH" >> generated-child.yml
-    echo "  - push-$DEPTH" >> generated-child.yml
-    DEPTH=$((DEPTH + 1))
+  echo "Pipeline generated successfully (empty)."
+  exit 0
+fi
+
+echo "Directories selected for build: $ALL_DIRS"
+
+cat > generated-child.yml <<EOF_YML
+stages:
+  - build
+  - update-pvc
+
+EOF_YML
+
+for DIR in $ALL_DIRS; do
+  NEED_PARENTS=""
+  for PAIR in $DEPENDENCY_PAIRS; do
+    BASE=${PAIR%%:*}
+    DEP=${PAIR#*:}
+    if [ "$DEP" = "$DIR" ]; then
+      case " $ALL_DIRS " in
+        *" $BASE "*) NEED_PARENTS="$NEED_PARENTS $BASE" ;;
+      esac
+    fi
   done
-  echo "  - update-pvc"  >> generated-child.yml
 
-  echo "Directories selected for build: $ALL_DIRS"
-
-  for DIR in $ALL_DIRS; do
-    cat >> generated-child.yml <<EOF
-build-${DIR}:
-  stage: build-${DIR_DEPTH}
-  image: docker:latest
-  services:
-    - name: docker:dind
-EOF_JOB
-
-    if [ -n "$NEEDS" ]; then
-      echo "  needs:" >> generated-child.yml
-      for N in $NEEDS; do
-        echo "    - \"$N\"" >> generated-child.yml
+  {
+    echo "build-push-${DIR}:"
+    echo "  stage: build"
+    echo "  image: docker:latest"
+    echo "  services:"
+    echo "    - name: docker:dind"
+    if [ -n "$NEED_PARENTS" ]; then
+      echo "  needs:"
+      for P in $NEED_PARENTS; do
+        echo "    - \"build-push-${P}\""
       done
     fi
-
-    cat >> generated-child.yml <<EOF_JOB
+    cat <<EOF_JOB
   before_script:
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
     - export NO_PROXY=\$NO_PROXY
     - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
   script:
-    - echo "Building image for $DIR"
+    - echo "Building image for ${DIR}"
     - docker build --build-arg HTTP_PROXY=\$HTTP_PROXY \
                    --build-arg HTTPS_PROXY=\$HTTPS_PROXY \
                    --build-arg NO_PROXY=\$NO_PROXY \
-                   -t "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/$DIR:latest" \
-                   ./images/$DIR
-
-push-${DIR}:
-  stage: push-${DIR_DEPTH}
-  image: docker:latest
-  services:
-    - name: docker:dind
-  needs: ["build-${DIR}"]
-  before_script:
-    - export HTTP_PROXY=\$HTTP_PROXY
-    - export HTTPS_PROXY=\$HTTPS_PROXY
-    - export NO_PROXY=\$NO_PROXY
-    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
-  script:
-    - echo "Pushing image for $DIR"
-    - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/$DIR:latest"
+                   -t "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest" \
+                   ./images/${DIR}
+    - echo "Pushing image for ${DIR}"
+    - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
 
 update-pvc-${DIR}:
   stage: update-pvc
@@ -139,15 +142,13 @@ update-pvc-${DIR}:
     JENKINS_JOB_PATH: "job/DSW/job/PVC-Updater"
   script:
     - |
-      # Dynamic parameters
       IMAGE_REF="\${DOCKER_REGISTRY}/\${DOCKER_REPOSITORY}/${DIR}:latest"
 
-      echo "=== 🚦 ETAP UPDATE-PVC ==="
+      echo "=== 🚦 ETAP UPDATE-PVC (${DIR}) ==="
       echo "📌 Zmienne:"
       echo "   IMAGE_REF: \$IMAGE_REF"
       echo "   JENKINS_JOB_PATH: \$JENKINS_JOB_PATH"
 
-      # Get CRUMB for CSRF protection
       echo "=== 🔒 Pobieranie CRUMB ==="
       CRUMB_JSON=\$(curl -s -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
         "\${JENKINS_URL}/crumbIssuer/api/json")
@@ -158,7 +159,6 @@ update-pvc-${DIR}:
       fi
       CRUMB_HEADER=\$(echo "\$CRUMB_JSON" | jq -r '.crumbRequestField')
 
-      # Trigger Jenkins job
       echo "===  Wywołanie Jenkinsa ==="
       FULL_URL="\${JENKINS_URL}/\${JENKINS_JOB_PATH}/buildWithParameters"
       echo " URL: \$FULL_URL"
@@ -184,6 +184,8 @@ update-pvc-${DIR}:
     - if: \$CI_COMMIT_BRANCH == "main"
 
 EOF_JOB
-  done
-fi
+  } >> generated-child.yml
+done
+
 echo "Pipeline generated successfully"
+
