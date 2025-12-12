@@ -22,9 +22,8 @@ for DOCKERFILE in images/*/Dockerfile; do
   [ -f "$DOCKERFILE" ] || continue
   CHILD_DIR=$(basename "$(dirname "$DOCKERFILE")")
   while IFS= read -r IMAGE_REF; do
-    BASE_IMAGE=${IMAGE_REF##*/}
-    BASE_IMAGE=${BASE_IMAGE%%@*}
-    BASE_IMAGE=${BASE_IMAGE%%:*}
+    REF_NO_TAG=${IMAGE_REF%%[:@]*}
+    BASE_IMAGE=${REF_NO_TAG##*/}
 
     if [ -d "images/${BASE_IMAGE}" ]; then
       PAIR="${BASE_IMAGE}:${CHILD_DIR}"
