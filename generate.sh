@@ -12,7 +12,9 @@ TO_REF="${CI_COMMIT_SHA:-HEAD}"
 
 CHANGED_DIRS=$(git diff --name-only "$FROM_REF" "$TO_REF" -- ./images \
   | awk -F'/' 'NF>=2 {print $2}' \
-  | sort -u)
+  | sort -u \
+  | tr '\n' ' ' \
+  | xargs)
 
 echo "Base directories found in diff: ${CHANGED_DIRS:-"<none>"}"
 
@@ -33,7 +35,17 @@ for DOCKERFILE in images/*/Dockerfile; do
       esac
     fi
   done <<EOF_FROM
-$(grep -E '^FROM[[:space:]]+' "$DOCKERFILE" | awk '{print $2}')
+$(
+  awk '
+    toupper($1)=="FROM" {
+      for (i=2; i<=NF; i++) {
+        if ($i ~ /^--platform=/) { continue }
+        print $i
+        break
+      }
+    }
+  ' "$DOCKERFILE"
+)
 EOF_FROM
 done
 
