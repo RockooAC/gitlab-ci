@@ -65,8 +65,7 @@ for DOCKERFILE in images/*/Dockerfile; do
   while IFS= read -r IMAGE_REF; do
     case "$IMAGE_REF" in
       *\$*|*\${*)
-        echo "Skipping non-literal image reference in ${DOCKERFILE}: ${IMAGE_REF}" >&2
-        continue
+        echo "Warning: non-literal image reference in ${DOCKERFILE}: ${IMAGE_REF}" >&2
         ;;
     esac
     REF_NO_TAG=${IMAGE_REF%%[:@]*}
