@@ -181,7 +181,7 @@ for DIR in $ALL_DIRS; do
     VARIANT_TMP=$(mktemp)
     TMP_FILES="${TMP_FILES}${TMP_FILES:+\n}$VARIANT_TMP"
 
-    while IFS= read -r MATRIX_LINE; do
+    while IFS= read -r MATRIX_LINE || [ -n "$MATRIX_LINE" ]; do
       MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
       MATRIX_LINE=${MATRIX_LINE%%#*}
       MATRIX_LINE=${MATRIX_LINE#${MATRIX_LINE%%[![:space:]]*}}
@@ -257,7 +257,7 @@ for DIR in $ALL_DIRS; do
 
     DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
 
-    while IFS='=' read -r MATRIX_KEY MATRIX_VALUE; do
+    while IFS='=' read -r MATRIX_KEY MATRIX_VALUE || [ -n "$MATRIX_KEY" ]; do
       [ -z "$MATRIX_KEY" ] && continue
 
       JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
