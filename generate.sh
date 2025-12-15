@@ -5,6 +5,13 @@
 
 set -eu
 
+is_valid_identifier() {
+  case "$1" in
+    *[!A-Za-z0-9._-]*|"") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 echo "Identifying changed directories in ./images"
 
 FROM_REF="${CI_COMMIT_BEFORE_SHA:-HEAD~1}"
@@ -34,6 +41,10 @@ DEPENDENCY_PAIRS=""
 for DOCKERFILE in images/*/Dockerfile; do
   [ -f "$DOCKERFILE" ] || continue
   CHILD_DIR=$(basename "$(dirname "$DOCKERFILE")")
+  if ! is_valid_identifier "$CHILD_DIR"; then
+    echo "Invalid directory name for job/image id: ${CHILD_DIR}" >&2
+    exit 1
+  fi
   while IFS= read -r IMAGE_REF; do
     REF_NO_TAG=${IMAGE_REF%%[:@]*}
     BASE_IMAGE=${REF_NO_TAG##*/}
@@ -49,11 +60,16 @@ for DOCKERFILE in images/*/Dockerfile; do
 $(
   awk '
     toupper($1)=="FROM" {
+      img=""; stage=""
       for (i=2; i<=NF; i++) {
         if ($i ~ /^--platform=/) { continue }
-        print $i
-        break
+        if (img=="") { img=$i; continue }
+        if (toupper($i)=="AS" && i+1<=NF) { stage=$(i+1); break }
       }
+      if (img=="" ) { next }
+      if (img in stage_seen) { next }
+      print img
+      if (stage!="") { stage_seen[stage]=1 }
     }
   ' "$DOCKERFILE"
 )
@@ -126,9 +142,8 @@ for DIR in $ALL_DIRS; do
   if [ -f "$MATRIX_FILE" ]; then
     echo "Matrix file detected for ${DIR}: ${MATRIX_FILE}"
 
-    DEFAULT_VARIANT_KEY=""
-    DEFAULT_VARIANT_JOB=""
-
+    VARIANTS=""
+    EXPLICIT_DEFAULT_KEY=""
     while IFS= read -r MATRIX_LINE; do
       MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
       MATRIX_LINE=${MATRIX_LINE%%#*}
@@ -146,6 +161,15 @@ for DIR in $ALL_DIRS; do
       MATRIX_VALUE=${MATRIX_VALUE_RAW#${MATRIX_VALUE_RAW%%[![:space:]]*}}
       MATRIX_VALUE=${MATRIX_VALUE%${MATRIX_VALUE##*[![:space:]]}}
 
+      if [ "$MATRIX_KEY" = "default" ]; then
+        if [ -z "$MATRIX_VALUE" ]; then
+          echo "Skipping matrix line with empty default selector: ${MATRIX_LINE}"
+          continue
+        fi
+        EXPLICIT_DEFAULT_KEY="$MATRIX_VALUE"
+        continue
+      fi
+
       if [ -z "$MATRIX_KEY" ] || [ "$MATRIX_KEY" = "$MATRIX_VALUE" ]; then
         echo "Skipping invalid matrix line: ${MATRIX_LINE}"
         continue
@@ -156,10 +180,44 @@ for DIR in $ALL_DIRS; do
         continue
       fi
 
+      if ! is_valid_identifier "$MATRIX_KEY"; then
+        echo "Skipping matrix line with unsafe key: ${MATRIX_LINE}"
+        continue
+      fi
+
+      VARIANTS="$VARIANTS ${MATRIX_KEY}=${MATRIX_VALUE}"
+    done < "$MATRIX_FILE"
+
+    if [ -z "$VARIANTS" ]; then
+      echo "No valid matrix entries found in ${MATRIX_FILE}."
+      exit 1
+    fi
+
+    DEFAULT_VARIANT_KEY=""
+    DEFAULT_VARIANT_JOB=""
+
+    for MATRIX_PAIR in $VARIANTS; do
+      MATRIX_KEY=${MATRIX_PAIR%%=*}
+
       if [ -z "$DEFAULT_VARIANT_KEY" ]; then
         DEFAULT_VARIANT_KEY="$MATRIX_KEY"
-        DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
       fi
+
+      if [ -n "$EXPLICIT_DEFAULT_KEY" ] && [ "$EXPLICIT_DEFAULT_KEY" = "$MATRIX_KEY" ]; then
+        DEFAULT_VARIANT_KEY="$MATRIX_KEY"
+      fi
+    done
+
+    if [ -n "$EXPLICIT_DEFAULT_KEY" ] && [ "$DEFAULT_VARIANT_KEY" != "$EXPLICIT_DEFAULT_KEY" ]; then
+      echo "Explicit default ${EXPLICIT_DEFAULT_KEY} not found for ${DIR}."
+      exit 1
+    fi
+
+    DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
+
+    for MATRIX_PAIR in $VARIANTS; do
+      MATRIX_KEY=${MATRIX_PAIR%%=*}
+      MATRIX_VALUE=${MATRIX_PAIR#*=}
 
       JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
       IMAGE_TAG="${MATRIX_KEY}"
@@ -251,12 +309,7 @@ update-pvc-${DIR}-${IMAGE_TAG}:
 
 EOF_JOB
       } >> generated-child.yml
-    done < "$MATRIX_FILE"
-
-    if [ -z "$DEFAULT_VARIANT_KEY" ]; then
-      echo "No valid matrix entries found in ${MATRIX_FILE}."
-      exit 1
-    fi
+    done
 
     {
       echo "build-push-${DIR}:"
@@ -279,7 +332,20 @@ EOF_JOB
     - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
   script:
     - echo "Promoting default variant ${DEFAULT_VARIANT_KEY} of ${DIR} to :latest"
-    - docker pull "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}"
+    - |
+        RETRIES=5
+        IMAGE_REF="\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}"
+        for ATTEMPT in \$(seq 1 \$RETRIES); do
+          if docker pull "\$IMAGE_REF"; then
+            break
+          fi
+          echo "Retrying pull (\$ATTEMPT/\$RETRIES) for ${DIR}:${DEFAULT_VARIANT_KEY}..."
+          if [ "\$ATTEMPT" -eq "\$RETRIES" ]; then
+            echo "Failed to pull image after \$RETRIES attempts"
+            exit 1
+          fi
+          sleep \$((ATTEMPT * 2))
+        done
     - docker tag "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}" \
                  "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
     - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
