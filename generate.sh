@@ -93,6 +93,16 @@ $(
         if (img in stage_seen) { continue }
         print img
       }
+      if (img=="") { next }
+      images[++img_count]=img
+      if (stage!="") { stage_seen[stage]=1 }
+    }
+    END {
+      for (i=1; i<=img_count; i++) {
+        img=images[i]
+        if (img in stage_seen) { continue }
+        print img
+      }
       if (img=="" ) { next }
       images[++img_count]=img
       if (stage!="") { stage_seen[stage]=1 }
@@ -248,6 +258,10 @@ for DIR in $ALL_DIRS; do
     VARIANT_KEYS=$(awk -F'=' 'NF>=2 {print $1}' "$VARIANT_TMP" | sort)
 
     if [ -n "$EXPLICIT_DEFAULT_KEY" ]; then
+      if ! is_valid_identifier "$EXPLICIT_DEFAULT_KEY"; then
+        echo "Invalid default selector: ${EXPLICIT_DEFAULT_KEY}" >&2
+        exit 1
+      fi
       if printf "%s\n" "$VARIANT_KEYS" | grep -qx "$EXPLICIT_DEFAULT_KEY"; then
         DEFAULT_VARIANT_KEY="$EXPLICIT_DEFAULT_KEY"
       else
@@ -354,8 +368,6 @@ update-pvc-${DIR}-${IMAGE_TAG}:
 EOF_JOB
       } >> generated-child.yml
     done < "$VARIANT_TMP"
-
-    rm -f "$VARIANT_TMP"
 
     {
       echo "build-push-${DIR}:"
