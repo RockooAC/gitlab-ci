@@ -83,6 +83,16 @@ $(
         print img
       }
       if (img=="" ) { next }
+      images[++img_count]=img
+      if (stage!="") { stage_seen[stage]=1 }
+    }
+    END {
+      for (i=1; i<=img_count; i++) {
+        img=images[i]
+        if (img in stage_seen) { continue }
+        print img
+      }
+      if (img=="" ) { next }
       if (img in stage_seen) { next }
       print img
       if (stage!="") { stage_seen[stage]=1 }
@@ -212,7 +222,10 @@ for DIR in $ALL_DIRS; do
     DEFAULT_VARIANT_KEY=""
     DEFAULT_VARIANT_JOB=""
 
-    VARIANT_KEYS=$(printf "%s" "$VARIANT_ENTRIES" | awk -F'=' 'NF>=2 {print $1}' | sort)
+    VARIANT_TMP=$(mktemp)
+    printf "%b" "$VARIANT_ENTRIES" > "$VARIANT_TMP"
+
+    VARIANT_KEYS=$(awk -F'=' 'NF>=2 {print $1}' "$VARIANT_TMP" | sort)
 
     if [ -n "$EXPLICIT_DEFAULT_KEY" ]; then
       if printf "%s\n" "$VARIANT_KEYS" | grep -qx "$EXPLICIT_DEFAULT_KEY"; then
@@ -227,7 +240,7 @@ for DIR in $ALL_DIRS; do
 
     DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
 
-    printf "%s" "$VARIANT_ENTRIES" | while IFS='=' read -r MATRIX_KEY MATRIX_VALUE; do
+    while IFS='=' read -r MATRIX_KEY MATRIX_VALUE; do
       [ -z "$MATRIX_KEY" ] && continue
 
       JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
@@ -320,7 +333,9 @@ update-pvc-${DIR}-${IMAGE_TAG}:
 
 EOF_JOB
       } >> generated-child.yml
-    done
+    done < "$VARIANT_TMP"
+
+    rm -f "$VARIANT_TMP"
 
     {
       echo "build-push-${DIR}:"
