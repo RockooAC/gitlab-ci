@@ -22,6 +22,10 @@ is_valid_identifier() {
   esac
 }
 
+has_matrix() {
+  [ -f "images/$1/build-matrix.env" ]
+}
+
 echo "Identifying changed directories in ./images"
 
 FROM_REF="${CI_COMMIT_BEFORE_SHA:-HEAD~1}"
@@ -271,7 +275,11 @@ for DIR in $ALL_DIRS; do
         if [ -n "$NEED_PARENTS" ]; then
           echo "  needs:"
           for P in $NEED_PARENTS; do
-            echo "    - \"build-push-${P}\""
+            if has_matrix "$P"; then
+              echo "    - \"build-push-${P}-${MATRIX_KEY}\""
+            else
+              echo "    - \"build-push-${P}\""
+            fi
           done
         fi
         cat <<EOF_JOB
