@@ -8,10 +8,9 @@ set -eu
 TMP_FILES=""
 
 cleanup() {
-  if [ -n "$TMP_FILES" ]; then
-    # shellcheck disable=SC2086
-    rm -f $TMP_FILES
-  fi
+  printf "%s\n" "$TMP_FILES" | while IFS= read -r f; do
+    [ -n "$f" ] && rm -f "$f"
+  done
 }
 
 trap cleanup EXIT
@@ -57,6 +56,12 @@ for DOCKERFILE in images/*/Dockerfile; do
     exit 1
   fi
   while IFS= read -r IMAGE_REF; do
+    case "$IMAGE_REF" in
+      *\$*|*\${*)
+        echo "Skipping non-literal image reference in ${DOCKERFILE}: ${IMAGE_REF}" >&2
+        continue
+        ;;
+    esac
     REF_NO_TAG=${IMAGE_REF%%[:@]*}
     BASE_IMAGE=${REF_NO_TAG##*/}
 
@@ -79,54 +84,20 @@ $(
     toupper($1)=="FROM" {
       img=""; stage=""
       for (i=2; i<=NF; i++) {
-        if ($i ~ /^--platform=/) { continue }
+        if ($i ~ /^--/) continue
         if (img=="") { img=$i; continue }
         if (toupper($i)=="AS" && i+1<=NF) { stage=$(i+1); break }
       }
-      if (img=="") { next }
+      if (img=="") next
       images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
+      if (stage!="") stage_seen[stage]=1
     }
     END {
       for (i=1; i<=img_count; i++) {
         img=images[i]
-        if (img in stage_seen) { continue }
+        if (img in stage_seen) continue
         print img
       }
-      if (img=="") { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      if (img in stage_seen) { next }
-      print img
-      if (stage!="") { stage_seen[stage]=1 }
     }
   ' "$DOCKERFILE"
 )
@@ -201,7 +172,7 @@ for DIR in $ALL_DIRS; do
 
     EXPLICIT_DEFAULT_KEY=""
     VARIANT_TMP=$(mktemp)
-    TMP_FILES="$TMP_FILES $VARIANT_TMP"
+    TMP_FILES="${TMP_FILES}${TMP_FILES:+\n}$VARIANT_TMP"
 
     while IFS= read -r MATRIX_LINE; do
       MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
@@ -249,6 +220,11 @@ for DIR in $ALL_DIRS; do
 
     if [ ! -s "$VARIANT_TMP" ]; then
       echo "No valid matrix entries found in ${MATRIX_FILE}."
+      exit 1
+    fi
+
+    if ! awk -F= 'seen[$1]++{exit 1}' "$VARIANT_TMP"; then
+      echo "Duplicate variant key in ${MATRIX_FILE}" >&2
       exit 1
     fi
 
