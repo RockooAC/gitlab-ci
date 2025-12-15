@@ -10,6 +10,12 @@ echo "Identifying changed directories in ./images"
 FROM_REF="${CI_COMMIT_BEFORE_SHA:-HEAD~1}"
 TO_REF="${CI_COMMIT_SHA:-HEAD}"
 
+case "$FROM_REF" in
+  0000000000000000000000000000000000000000)
+    FROM_REF="${TO_REF}~1"
+    ;;
+esac
+
 CHANGED_DIRS=$(git diff --name-only "$FROM_REF" "$TO_REF" -- ./images \
   | awk -F'/' 'NF>=2 {print $2}' \
   | sort -u \
@@ -306,7 +312,7 @@ update-pvc-${DIR}:
         exit 1
       fi
   rules:
-    - if: \$CI_COMMIT_BRANCH == "main"
+    - if: \$CI_COMMIT_BRANCH == \$CI_DEFAULT_BRANCH
 
 EOF_JOB
   } >> generated-child.yml
