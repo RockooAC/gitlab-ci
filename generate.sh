@@ -9,7 +9,7 @@ TMP_FILES=""
 
 cleanup() {
   printf "%s\n" "$TMP_FILES" | while IFS= read -r f; do
-    [ -n "$f" ] && rm -f "$f"
+    [ -n "$f" ] && rm -f "$f" || true
   done
 }
 
@@ -43,6 +43,13 @@ CHANGED_DIRS=$(git diff --name-only "$FROM_REF" "$TO_REF" -- ./images \
   | sort -u \
   | tr '\n' ' ' \
   | xargs)
+
+for d in $CHANGED_DIRS; do
+  if ! is_valid_identifier "$d"; then
+    echo "Invalid changed directory name for job/image id: $d" >&2
+    exit 1
+  fi
+done
 
 echo "Base directories found in diff: ${CHANGED_DIRS:-"<none>"}"
 
@@ -273,7 +280,7 @@ for DIR in $ALL_DIRS; do
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
     - export NO_PROXY=\$NO_PROXY
-    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+    - echo "\$ARTIFACTORY_PASS" | docker login -u "\$ARTIFACTORY_USER" --password-stdin "\$ARTIFACTORY_URL"
   script:
     - echo "Building image for ${DIR} (${IMAGE_TAG})"
     - docker build --build-arg HTTP_PROXY=\$HTTP_PROXY \
@@ -363,7 +370,7 @@ EOF_JOB
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
     - export NO_PROXY=\$NO_PROXY
-    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+    - echo "\$ARTIFACTORY_PASS" | docker login -u "\$ARTIFACTORY_USER" --password-stdin "\$ARTIFACTORY_URL"
   script:
     - echo "Promoting default variant ${DEFAULT_VARIANT_KEY} of ${DIR} to :latest"
     - |
@@ -464,7 +471,7 @@ EOF_JOB
     - export HTTP_PROXY=\$HTTP_PROXY
     - export HTTPS_PROXY=\$HTTPS_PROXY
     - export NO_PROXY=\$NO_PROXY
-    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+    - echo "\$ARTIFACTORY_PASS" | docker login -u "\$ARTIFACTORY_USER" --password-stdin "\$ARTIFACTORY_URL"
   script:
     - echo "Building image for ${DIR}"
     - docker build --build-arg HTTP_PROXY=\$HTTP_PROXY \
