@@ -110,6 +110,120 @@ for DIR in $ALL_DIRS; do
     fi
   done
 
+  MATRIX_FILE="images/${DIR}/build-matrix.env"
+
+  if [ -f "$MATRIX_FILE" ]; then
+    echo "Matrix file detected for ${DIR}: ${MATRIX_FILE}"
+
+    while IFS= read -r MATRIX_LINE; do
+      [ -z "$MATRIX_LINE" ] && continue
+      case "$MATRIX_LINE" in
+        \#*) continue ;;
+      esac
+
+      MATRIX_KEY=${MATRIX_LINE%%=*}
+      MATRIX_VALUE=${MATRIX_LINE#*=}
+
+      if [ -z "$MATRIX_KEY" ] || [ "$MATRIX_KEY" = "$MATRIX_VALUE" ]; then
+        echo "Skipping invalid matrix line: ${MATRIX_LINE}"
+        continue
+      fi
+
+      JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
+      IMAGE_TAG="${MATRIX_KEY}"
+
+      {
+        echo "${JOB_NAME}:"
+        echo "  stage: build"
+        echo "  image: docker:latest"
+        echo "  services:"
+        echo "    - name: docker:dind"
+        if [ -n "$NEED_PARENTS" ]; then
+          echo "  needs:"
+          for P in $NEED_PARENTS; do
+            echo "    - \"build-push-${P}\""
+          done
+        fi
+        cat <<EOF_JOB
+  before_script:
+    - export HTTP_PROXY=\$HTTP_PROXY
+    - export HTTPS_PROXY=\$HTTPS_PROXY
+    - export NO_PROXY=\$NO_PROXY
+    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+  script:
+    - echo "Building image for ${DIR} (${IMAGE_TAG})"
+    - docker build --build-arg HTTP_PROXY=\$HTTP_PROXY \
+                   --build-arg HTTPS_PROXY=\$HTTPS_PROXY \
+                   --build-arg NO_PROXY=\$NO_PROXY \
+                   --build-arg PYTHON_VERSION=${MATRIX_VALUE} \
+                   -t "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${IMAGE_TAG}" \
+                   ./images/${DIR}
+    - echo "Pushing image for ${DIR}:${IMAGE_TAG}"
+    - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${IMAGE_TAG}"
+
+update-pvc-${DIR}-${IMAGE_TAG}:
+  stage: update-pvc
+  image: ubuntu:22.04
+  needs: ["${JOB_NAME}"]
+  before_script:
+    - export HTTP_PROXY=\$HTTP_PROXY
+    - export HTTPS_PROXY=\$HTTPS_PROXY
+    - export NO_PROXY=\$NO_PROXY
+    - apt-get update -yq
+    - apt-get install -yq curl jq git
+  variables:
+    JENKINS_URL: "https://jenkins.redge.com"
+    JENKINS_JOB_PATH: "job/DSW/job/PVC-Updater"
+  script:
+    - |
+      IMAGE_REF="\${DOCKER_REGISTRY}/\${DOCKER_REPOSITORY}/${DIR}:${IMAGE_TAG}"
+
+      echo "=== 🚦 ETAP UPDATE-PVC (${DIR}:${IMAGE_TAG}) ==="
+      echo "📌 Zmienne:"
+      echo "   IMAGE_REF: \$IMAGE_REF"
+      echo "   JENKINS_JOB_PATH: \$JENKINS_JOB_PATH"
+
+      echo "=== 🔒 Pobieranie CRUMB ==="
+      CRUMB_JSON=\$(curl -s -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
+        "\${JENKINS_URL}/crumbIssuer/api/json")
+
+      if ! CRUMB=\$(echo "\$CRUMB_JSON" | jq -r '.crumb'); then
+        echo "❌ Błąd parsowania CRUMB:"
+        exit 1
+      fi
+      CRUMB_HEADER=\$(echo "\$CRUMB_JSON" | jq -r '.crumbRequestField')
+
+      echo "===  Wywołanie Jenkinsa ==="
+      FULL_URL="\${JENKINS_URL}/\${JENKINS_JOB_PATH}/buildWithParameters"
+      echo " URL: \$FULL_URL"
+
+      HTTP_STATUS=\$(curl -w "%{http_code}" -s -o /tmp/jenkins_response \
+        -X POST \
+        -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
+        -H "\${CRUMB_HEADER}: \${CRUMB}" \
+        --data-urlencode "IMAGE_NAME=\${IMAGE_REF}" \
+        "\$FULL_URL")
+
+      echo "📡 Status HTTP: \$HTTP_STATUS"
+
+      if [ "\$HTTP_STATUS" = "201" ]; then
+        echo "✅ Job uruchomiony pomyślnie!"
+        echo "⚙️ Szczegóły: \${JENKINS_URL}/\${JENKINS_JOB_PATH}"
+      else
+        echo "❌ Błąd! Odpowiedź:"
+        cat /tmp/jenkins_response
+        exit 1
+      fi
+  rules:
+    - if: \$CI_COMMIT_BRANCH == "main"
+
+EOF_JOB
+      } >> generated-child.yml
+    done < "$MATRIX_FILE"
+
+    continue
+  fi
+
   {
     echo "build-push-${DIR}:"
     echo "  stage: build"
