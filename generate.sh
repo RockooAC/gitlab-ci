@@ -5,6 +5,17 @@
 
 set -eu
 
+TMP_FILES=""
+
+cleanup() {
+  if [ -n "$TMP_FILES" ]; then
+    # shellcheck disable=SC2086
+    rm -f $TMP_FILES
+  fi
+}
+
+trap cleanup EXIT
+
 is_valid_identifier() {
   case "$1" in
     *[!A-Za-z0-9._-]*|"") return 1 ;;
@@ -71,6 +82,16 @@ $(
         if ($i ~ /^--platform=/) { continue }
         if (img=="") { img=$i; continue }
         if (toupper($i)=="AS" && i+1<=NF) { stage=$(i+1); break }
+      }
+      if (img=="") { next }
+      images[++img_count]=img
+      if (stage!="") { stage_seen[stage]=1 }
+    }
+    END {
+      for (i=1; i<=img_count; i++) {
+        img=images[i]
+        if (img in stage_seen) { continue }
+        print img
       }
       if (img=="" ) { next }
       images[++img_count]=img
@@ -168,8 +189,10 @@ for DIR in $ALL_DIRS; do
   if [ -f "$MATRIX_FILE" ]; then
     echo "Matrix file detected for ${DIR}: ${MATRIX_FILE}"
 
-    VARIANT_ENTRIES=""
     EXPLICIT_DEFAULT_KEY=""
+    VARIANT_TMP=$(mktemp)
+    TMP_FILES="$TMP_FILES $VARIANT_TMP"
+
     while IFS= read -r MATRIX_LINE; do
       MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
       MATRIX_LINE=${MATRIX_LINE%%#*}
@@ -211,19 +234,16 @@ for DIR in $ALL_DIRS; do
         continue
       fi
 
-      VARIANT_ENTRIES="${VARIANT_ENTRIES}${MATRIX_KEY}=${MATRIX_VALUE}\n"
+      printf "%s=%s\n" "$MATRIX_KEY" "$MATRIX_VALUE" >> "$VARIANT_TMP"
     done < "$MATRIX_FILE"
 
-    if [ -z "$VARIANT_ENTRIES" ]; then
+    if [ ! -s "$VARIANT_TMP" ]; then
       echo "No valid matrix entries found in ${MATRIX_FILE}."
       exit 1
     fi
 
     DEFAULT_VARIANT_KEY=""
     DEFAULT_VARIANT_JOB=""
-
-    VARIANT_TMP=$(mktemp)
-    printf "%b" "$VARIANT_ENTRIES" > "$VARIANT_TMP"
 
     VARIANT_KEYS=$(awk -F'=' 'NF>=2 {print $1}' "$VARIANT_TMP" | sort)
 
@@ -235,7 +255,7 @@ for DIR in $ALL_DIRS; do
         exit 1
       fi
     else
-      DEFAULT_VARIANT_KEY=$(printf "%s" "$VARIANT_KEYS" | head -n1)
+      DEFAULT_VARIANT_KEY=$(printf "%s\n" "$VARIANT_KEYS" | head -n1)
     fi
 
     DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
