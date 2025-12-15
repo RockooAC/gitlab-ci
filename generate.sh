@@ -49,6 +49,11 @@ for DOCKERFILE in images/*/Dockerfile; do
     REF_NO_TAG=${IMAGE_REF%%[:@]*}
     BASE_IMAGE=${REF_NO_TAG##*/}
 
+    if ! is_valid_identifier "$BASE_IMAGE"; then
+      echo "Skipping dependency with invalid parent name: ${BASE_IMAGE}" >&2
+      continue
+    fi
+
     if [ -d "images/${BASE_IMAGE}" ]; then
       PAIR="${BASE_IMAGE}:${CHILD_DIR}"
       case " $DEPENDENCY_PAIRS " in
@@ -59,12 +64,23 @@ for DOCKERFILE in images/*/Dockerfile; do
   done <<EOF_FROM
 $(
   awk '
+    BEGIN { img_count=0 }
     toupper($1)=="FROM" {
       img=""; stage=""
       for (i=2; i<=NF; i++) {
         if ($i ~ /^--platform=/) { continue }
         if (img=="") { img=$i; continue }
         if (toupper($i)=="AS" && i+1<=NF) { stage=$(i+1); break }
+      }
+      if (img=="" ) { next }
+      images[++img_count]=img
+      if (stage!="") { stage_seen[stage]=1 }
+    }
+    END {
+      for (i=1; i<=img_count; i++) {
+        img=images[i]
+        if (img in stage_seen) { continue }
+        print img
       }
       if (img=="" ) { next }
       if (img in stage_seen) { next }
@@ -142,7 +158,7 @@ for DIR in $ALL_DIRS; do
   if [ -f "$MATRIX_FILE" ]; then
     echo "Matrix file detected for ${DIR}: ${MATRIX_FILE}"
 
-    VARIANTS=""
+    VARIANT_ENTRIES=""
     EXPLICIT_DEFAULT_KEY=""
     while IFS= read -r MATRIX_LINE; do
       MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
@@ -185,10 +201,10 @@ for DIR in $ALL_DIRS; do
         continue
       fi
 
-      VARIANTS="$VARIANTS ${MATRIX_KEY}=${MATRIX_VALUE}"
+      VARIANT_ENTRIES="${VARIANT_ENTRIES}${MATRIX_KEY}=${MATRIX_VALUE}\n"
     done < "$MATRIX_FILE"
 
-    if [ -z "$VARIANTS" ]; then
+    if [ -z "$VARIANT_ENTRIES" ]; then
       echo "No valid matrix entries found in ${MATRIX_FILE}."
       exit 1
     fi
@@ -196,28 +212,23 @@ for DIR in $ALL_DIRS; do
     DEFAULT_VARIANT_KEY=""
     DEFAULT_VARIANT_JOB=""
 
-    for MATRIX_PAIR in $VARIANTS; do
-      MATRIX_KEY=${MATRIX_PAIR%%=*}
+    VARIANT_KEYS=$(printf "%s" "$VARIANT_ENTRIES" | awk -F'=' 'NF>=2 {print $1}' | sort)
 
-      if [ -z "$DEFAULT_VARIANT_KEY" ]; then
-        DEFAULT_VARIANT_KEY="$MATRIX_KEY"
+    if [ -n "$EXPLICIT_DEFAULT_KEY" ]; then
+      if printf "%s\n" "$VARIANT_KEYS" | grep -qx "$EXPLICIT_DEFAULT_KEY"; then
+        DEFAULT_VARIANT_KEY="$EXPLICIT_DEFAULT_KEY"
+      else
+        echo "Explicit default ${EXPLICIT_DEFAULT_KEY} not found for ${DIR}."
+        exit 1
       fi
-
-      if [ -n "$EXPLICIT_DEFAULT_KEY" ] && [ "$EXPLICIT_DEFAULT_KEY" = "$MATRIX_KEY" ]; then
-        DEFAULT_VARIANT_KEY="$MATRIX_KEY"
-      fi
-    done
-
-    if [ -n "$EXPLICIT_DEFAULT_KEY" ] && [ "$DEFAULT_VARIANT_KEY" != "$EXPLICIT_DEFAULT_KEY" ]; then
-      echo "Explicit default ${EXPLICIT_DEFAULT_KEY} not found for ${DIR}."
-      exit 1
+    else
+      DEFAULT_VARIANT_KEY=$(printf "%s" "$VARIANT_KEYS" | head -n1)
     fi
 
     DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
 
-    for MATRIX_PAIR in $VARIANTS; do
-      MATRIX_KEY=${MATRIX_PAIR%%=*}
-      MATRIX_VALUE=${MATRIX_PAIR#*=}
+    printf "%s" "$VARIANT_ENTRIES" | while IFS='=' read -r MATRIX_KEY MATRIX_VALUE; do
+      [ -z "$MATRIX_KEY" ] && continue
 
       JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
       IMAGE_TAG="${MATRIX_KEY}"
@@ -339,12 +350,13 @@ EOF_JOB
           if docker pull "\$IMAGE_REF"; then
             break
           fi
-          echo "Retrying pull (\$ATTEMPT/\$RETRIES) for ${DIR}:${DEFAULT_VARIANT_KEY}..."
           if [ "\$ATTEMPT" -eq "\$RETRIES" ]; then
             echo "Failed to pull image after \$RETRIES attempts"
             exit 1
           fi
-          sleep \$((ATTEMPT * 2))
+          SLEEP_SECONDS=$((2 ** (ATTEMPT - 1)))
+          echo "Pull failed (attempt \$ATTEMPT/\$RETRIES), retrying in \${SLEEP_SECONDS}s for ${DIR}:${DEFAULT_VARIANT_KEY}..."
+          sleep "\$SLEEP_SECONDS"
         done
     - docker tag "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}" \
                  "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
