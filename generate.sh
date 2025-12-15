@@ -79,54 +79,20 @@ $(
     toupper($1)=="FROM" {
       img=""; stage=""
       for (i=2; i<=NF; i++) {
-        if ($i ~ /^--platform=/) { continue }
+        if ($i ~ /^--platform=/) continue
         if (img=="") { img=$i; continue }
         if (toupper($i)=="AS" && i+1<=NF) { stage=$(i+1); break }
       }
-      if (img=="") { next }
+      if (img=="") next
       images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
+      if (stage!="") stage_seen[stage]=1
     }
     END {
       for (i=1; i<=img_count; i++) {
         img=images[i]
-        if (img in stage_seen) { continue }
+        if (img in stage_seen) continue
         print img
       }
-      if (img=="") { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      images[++img_count]=img
-      if (stage!="") { stage_seen[stage]=1 }
-    }
-    END {
-      for (i=1; i<=img_count; i++) {
-        img=images[i]
-        if (img in stage_seen) { continue }
-        print img
-      }
-      if (img=="" ) { next }
-      if (img in stage_seen) { next }
-      print img
-      if (stage!="") { stage_seen[stage]=1 }
     }
   ' "$DOCKERFILE"
 )
