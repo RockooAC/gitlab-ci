@@ -82,6 +82,10 @@ $(
         if (img in stage_seen) { continue }
         print img
       }
+      if (img=="" ) { next }
+      if (img in stage_seen) { next }
+      print img
+      if (stage!="") { stage_seen[stage]=1 }
     }
   ' "$DOCKERFILE"
 )
