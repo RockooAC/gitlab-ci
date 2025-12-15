@@ -16,6 +16,11 @@ case "$FROM_REF" in
     ;;
 esac
 
+if ! git rev-parse --verify "$FROM_REF" >/dev/null 2>&1; then
+  echo "Fallback: reference $FROM_REF not found, diffing against empty tree"
+  FROM_REF=$(git hash-object -t tree /dev/null)
+fi
+
 CHANGED_DIRS=$(git diff --name-only "$FROM_REF" "$TO_REF" -- ./images \
   | awk -F'/' 'NF>=2 {print $2}' \
   | sort -u \
@@ -121,18 +126,39 @@ for DIR in $ALL_DIRS; do
   if [ -f "$MATRIX_FILE" ]; then
     echo "Matrix file detected for ${DIR}: ${MATRIX_FILE}"
 
-    while IFS= read -r MATRIX_LINE; do
-      [ -z "$MATRIX_LINE" ] && continue
-      case "$MATRIX_LINE" in
-        \#*) continue ;;
-      esac
+    DEFAULT_VARIANT_KEY=""
+    DEFAULT_VARIANT_JOB=""
 
-      MATRIX_KEY=${MATRIX_LINE%%=*}
-      MATRIX_VALUE=${MATRIX_LINE#*=}
+    while IFS= read -r MATRIX_LINE; do
+      MATRIX_LINE=$(printf "%s" "$MATRIX_LINE" | tr -d '\r')
+      MATRIX_LINE=${MATRIX_LINE%%#*}
+      MATRIX_LINE=${MATRIX_LINE#${MATRIX_LINE%%[![:space:]]*}}
+      MATRIX_LINE=${MATRIX_LINE%${MATRIX_LINE##*[![:space:]]}}
+
+      [ -z "$MATRIX_LINE" ] && continue
+
+      MATRIX_KEY_RAW=${MATRIX_LINE%%=*}
+      MATRIX_VALUE_RAW=${MATRIX_LINE#*=}
+
+      MATRIX_KEY=${MATRIX_KEY_RAW#${MATRIX_KEY_RAW%%[![:space:]]*}}
+      MATRIX_KEY=${MATRIX_KEY%${MATRIX_KEY##*[![:space:]]}}
+
+      MATRIX_VALUE=${MATRIX_VALUE_RAW#${MATRIX_VALUE_RAW%%[![:space:]]*}}
+      MATRIX_VALUE=${MATRIX_VALUE%${MATRIX_VALUE##*[![:space:]]}}
 
       if [ -z "$MATRIX_KEY" ] || [ "$MATRIX_KEY" = "$MATRIX_VALUE" ]; then
         echo "Skipping invalid matrix line: ${MATRIX_LINE}"
         continue
+      fi
+
+      if [ -z "$MATRIX_VALUE" ]; then
+        echo "Skipping matrix line with empty value: ${MATRIX_LINE}"
+        continue
+      fi
+
+      if [ -z "$DEFAULT_VARIANT_KEY" ]; then
+        DEFAULT_VARIANT_KEY="$MATRIX_KEY"
+        DEFAULT_VARIANT_JOB="build-push-${DIR}-${DEFAULT_VARIANT_KEY}"
       fi
 
       JOB_NAME="build-push-${DIR}-${MATRIX_KEY}"
@@ -221,11 +247,101 @@ update-pvc-${DIR}-${IMAGE_TAG}:
         exit 1
       fi
   rules:
-    - if: \$CI_COMMIT_BRANCH == "main"
+    - if: \$CI_COMMIT_BRANCH == \$CI_DEFAULT_BRANCH
 
 EOF_JOB
       } >> generated-child.yml
     done < "$MATRIX_FILE"
+
+    if [ -z "$DEFAULT_VARIANT_KEY" ]; then
+      echo "No valid matrix entries found in ${MATRIX_FILE}."
+      exit 1
+    fi
+
+    {
+      echo "build-push-${DIR}:"
+      echo "  stage: build"
+      echo "  image: docker:latest"
+      echo "  services:"
+      echo "    - name: docker:dind"
+      echo "  needs:"
+      if [ -n "$NEED_PARENTS" ]; then
+        for P in $NEED_PARENTS; do
+          echo "    - \"build-push-${P}\""
+        done
+      fi
+      echo "    - \"${DEFAULT_VARIANT_JOB}\""
+      cat <<EOF_JOB
+  before_script:
+    - export HTTP_PROXY=\$HTTP_PROXY
+    - export HTTPS_PROXY=\$HTTPS_PROXY
+    - export NO_PROXY=\$NO_PROXY
+    - docker login -u "\$ARTIFACTORY_USER" -p "\$ARTIFACTORY_PASS" "\$ARTIFACTORY_URL"
+  script:
+    - echo "Promoting default variant ${DEFAULT_VARIANT_KEY} of ${DIR} to :latest"
+    - docker pull "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}"
+    - docker tag "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:${DEFAULT_VARIANT_KEY}" \
+                 "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
+    - docker push "\$DOCKER_REGISTRY/\$DOCKER_REPOSITORY/${DIR}:latest"
+
+update-pvc-${DIR}:
+  stage: update-pvc
+  image: ubuntu:22.04
+  needs: ["build-push-${DIR}"]
+  before_script:
+    - export HTTP_PROXY=\$HTTP_PROXY
+    - export HTTPS_PROXY=\$HTTPS_PROXY
+    - export NO_PROXY=\$NO_PROXY
+    - apt-get update -yq
+    - apt-get install -yq curl jq git
+  variables:
+    JENKINS_URL: "https://jenkins.redge.com"
+    JENKINS_JOB_PATH: "job/DSW/job/PVC-Updater"
+  script:
+    - |
+      IMAGE_REF="\${DOCKER_REGISTRY}/\${DOCKER_REPOSITORY}/${DIR}:latest"
+
+      echo "=== 🚦 ETAP UPDATE-PVC (${DIR}) ==="
+      echo "📌 Zmienne:"
+      echo "   IMAGE_REF: \$IMAGE_REF"
+      echo "   JENKINS_JOB_PATH: \$JENKINS_JOB_PATH"
+
+      echo "=== 🔒 Pobieranie CRUMB ==="
+      CRUMB_JSON=\$(curl -s -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
+        "\${JENKINS_URL}/crumbIssuer/api/json")
+
+      if ! CRUMB=\$(echo "\$CRUMB_JSON" | jq -r '.crumb'); then
+        echo "❌ Błąd parsowania CRUMB:"
+        exit 1
+      fi
+      CRUMB_HEADER=\$(echo "\$CRUMB_JSON" | jq -r '.crumbRequestField')
+
+      echo "===  Wywołanie Jenkinsa ==="
+      FULL_URL="\${JENKINS_URL}/\${JENKINS_JOB_PATH}/buildWithParameters"
+      echo " URL: \$FULL_URL"
+
+      HTTP_STATUS=\$(curl -w "%{http_code}" -s -o /tmp/jenkins_response \
+        -X POST \
+        -u "\${JENKINS_USER}:\${JENKINS_API_TOKEN}" \
+        -H "\${CRUMB_HEADER}: \${CRUMB}" \
+        --data-urlencode "IMAGE_NAME=\${IMAGE_REF}" \
+        "\$FULL_URL")
+
+      echo "📡 Status HTTP: \$HTTP_STATUS"
+
+      if [ "\$HTTP_STATUS" = "201" ]; then
+        echo "✅ Job uruchomiony pomyślnie!"
+        echo "⚙️ Szczegóły: \${JENKINS_URL}/\${JENKINS_JOB_PATH}"
+      else
+        echo "❌ Błąd! Odpowiedź:"
+        cat /tmp/jenkins_response
+        exit 1
+      fi
+  rules:
+    - if: \$CI_COMMIT_BRANCH == \$CI_DEFAULT_BRANCH
+
+EOF_JOB
+    } >> generated-child.yml
 
     continue
   fi
